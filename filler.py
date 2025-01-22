@@ -32,6 +32,7 @@ def preprocess_timestamp_column(df):
     df['DayOfYear'] = df['Timestamp'].dt.dayofyear
     df['Year'] = df['Timestamp'].dt.year
     df['SecondsOfDay'] = df['Timestamp'].dt.hour * 3600 + df['Timestamp'].dt.minute * 60 + df['Timestamp'].dt.second
+    df['DayOfWeek'] = df['Timestamp'].dt.dayofweek  # Monday=0, Sunday=6
 
     # Calculate minimum distance from 15th of July
     def calculate_jul_15(year):

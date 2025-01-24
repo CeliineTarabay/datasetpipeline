@@ -63,15 +63,19 @@ else:
     print("No subjects have unparseable timestamps.")
 
 def split_geometry_column(df):
-    # Extract Latitude and Longitude from the 'geometry' column
-    df[['Longitude', 'Latitude']] = df['geometry'].str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)').astype(float)
+    if 'geometry' in df.columns:
+        # Extract Latitude and Longitude from the 'geometry' column
+        df[['Longitude', 'Latitude']] = df['geometry'].str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)').astype(float)
+        # Drop the original 'geometry' column if no longer needed
+        df = df.drop(columns=['geometry'])
     return df
 
 # Split 'geometry' column into 'Longitude' and 'Latitude'
 data = split_geometry_column(data)
 
 # Drop the original 'geometry' column if no longer needed
-data = data.drop(columns=['geometry'])
+if 'geometry' in data.columns:
+    data = data.drop(columns=['geometry'])
 
 
 def fill_missing_values(df, method):

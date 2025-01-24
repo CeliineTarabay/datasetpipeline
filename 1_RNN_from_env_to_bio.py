@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, r2_score
+import matplotlib.pyplot as plt
 
 
 # Load and preprocess the dataset
@@ -31,24 +32,10 @@ def evaluate_metrics(y_true, y_pred):
 
 def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t, X_val_t, Y_val_t, 
                               epochs=20, batch_size=32, check_interval=5, patience=5):
-    """
-    Training loop with user interaction and early stopping.
-    
-    Args:
-        model: The PyTorch model to train.
-        optimizer: The optimizer for training.
-        criterion: The loss function.
-        X_train_t: Training input data (tensor).
-        Y_train_t: Training target data (tensor).
-        X_val_t: Validation input data (tensor).
-        Y_val_t: Validation target data (tensor).
-        epochs: Total number of epochs to train.
-        batch_size: Batch size for training.
-        check_interval: Number of epochs after which to ask user if they want to continue.
-        patience: Number of epochs to wait for validation loss improvement before stopping.
-    """
     best_val_loss = float('inf')
     patience_counter = 0
+    train_losses = []  # To store training loss
+    val_losses = []    # To store validation loss
 
     for epoch in range(epochs):
         model.train()
@@ -67,15 +54,19 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
             
             batch_losses.append(loss.item())
         
+        train_loss = np.mean(batch_losses)
+        train_losses.append(train_loss)  # Save training loss
+
         # Validation
         model.eval()
         with torch.no_grad():
             val_outputs = model(X_val_t)
             val_loss = criterion(val_outputs, Y_val_t).item()
+        val_losses.append(val_loss)  # Save validation loss
         
-        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {np.mean(batch_losses):.4f}, Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
         
-        # Early stopping check
+        # Early stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
@@ -86,7 +77,7 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
                 print("Early stopping triggered.")
                 break
         
-        # Check every `check_interval` epochs
+        # User interaction
         if (epoch + 1) % check_interval == 0 and (epoch + 1) < epochs:
             response = input("Do you want to continue training? (yes/no): ").strip().lower()
             if response != 'yes':
@@ -95,6 +86,7 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
                 break
     
     print("Training completed. Best validation loss: {:.4f}".format(best_val_loss))
+    return train_losses, val_losses  # Return loss history
 
 
 # Split the dataset chronologically within each subject
@@ -167,18 +159,30 @@ target_cols = [
     "Sympathovagal Balance (a.u.)",
 ]
 
+# Filter the feature columns to include only those present in the DataFrame
+available_feature_cols = [col for col in feature_cols if col in train_df.columns]
+
+# Check if any target columns are missing
+available_target_cols = [col for col in target_cols if col in train_df.columns]
+
+if not available_feature_cols:
+    raise ValueError("No feature columns are available in the dataset!")
+
+if not available_target_cols:
+    raise ValueError("No target columns are available in the dataset!")
+
 # Normalize environmental and biological variables separately
 env_scaler = StandardScaler()
 bio_scaler = StandardScaler()
 
 # Fit scalers on training data only
-env_scaler.fit(train_df[feature_cols])
-bio_scaler.fit(train_df[target_cols])
+env_scaler.fit(train_df[available_feature_cols])
+bio_scaler.fit(train_df[available_target_cols])
 
 # Transform datasets
 for df in [train_df, val_df, test_df]:
-    df[feature_cols] = env_scaler.transform(df[feature_cols])
-    df[target_cols] = bio_scaler.transform(df[target_cols])
+    df[available_feature_cols] = env_scaler.transform(df[available_feature_cols])
+    df[available_target_cols] = bio_scaler.transform(df[available_target_cols])
 
 
 # Create sequences for time-series forecasting
@@ -200,9 +204,9 @@ def build_dataset(df, feature_cols, target_cols, seq_length=10):
     return np.concatenate(X_list), np.concatenate(Y_list)
 
 seq_length = 10
-X_train, Y_train = build_dataset(train_df, feature_cols, target_cols, seq_length)
-X_val, Y_val = build_dataset(val_df, feature_cols, target_cols, seq_length)
-X_test, Y_test = build_dataset(test_df, feature_cols, target_cols, seq_length)
+X_train, Y_train = build_dataset(train_df, available_feature_cols, available_target_cols, seq_length)
+X_val, Y_val = build_dataset(val_df, available_feature_cols, available_target_cols, seq_length)
+X_test, Y_test = build_dataset(test_df, available_feature_cols, available_target_cols, seq_length)
 
 # Convert to PyTorch tensors
 X_train_t = torch.tensor(X_train, dtype=torch.float32)
@@ -233,18 +237,18 @@ class LSTMAttn(nn.Module):
         return self.fc(context)
 
 # Initialize the model, loss function, and optimizer
-input_size = len(feature_cols)
-output_size = len(target_cols)
+input_size = len(available_feature_cols)  # Use the filtered feature columns
+output_size = len(available_target_cols)  # Use the filtered target columns
 hidden_size = 128
 epochs = 40  # Total number of epochs you intend to train for
-batch_size=16
+batch_size = 128
 
 model = LSTMAttn(input_size, hidden_size, output_size)
 criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+optimizer = optim.Adam(model.parameters(), lr=1e-2, weight_decay=1e-4)
 
 # Call the interactive training loop
-interactive_training_loop(
+train_losses, val_losses = interactive_training_loop(
     model=model,
     optimizer=optimizer,
     criterion=criterion,
@@ -258,18 +262,15 @@ interactive_training_loop(
     patience=8         # Early stopping patience
 )
 
-# Evaluate on test data
-model.eval()
-with torch.no_grad():
-    test_outputs = model(X_test_t).cpu().numpy()  # Predicted values
-    y_test_true = Y_test_t.cpu().numpy()  # True values
-
-# Scale back biological variables to original scale
-test_outputs_rescaled = bio_scaler.inverse_transform(test_outputs)
-y_test_true_rescaled = bio_scaler.inverse_transform(y_test_true)
-
-# Evaluate metrics
-evaluate_metrics(y_test_true_rescaled, test_outputs_rescaled)
+# Plot training and validation loss
+plt.figure(figsize=(10, 5))
+plt.plot(train_losses, label="Training Loss", color='blue')
+plt.plot(val_losses, label="Validation Loss", color='orange')
+plt.title("Training and Validation Loss over Epochs")
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()
 
 # Evaluate on test data
 model.eval()
@@ -283,3 +284,65 @@ y_test_true_rescaled = bio_scaler.inverse_transform(y_test_true)
 
 # Evaluate metrics
 evaluate_metrics(y_test_true_rescaled, test_outputs_rescaled)
+
+# Evaluate on test data
+model.eval()
+with torch.no_grad():
+    test_outputs = model(X_test_t).cpu().numpy()  # Predicted values
+    y_test_true = Y_test_t.cpu().numpy()  # True values
+
+# Scale back biological variables to original scale
+test_outputs_rescaled = bio_scaler.inverse_transform(test_outputs)
+y_test_true_rescaled = bio_scaler.inverse_transform(y_test_true)
+
+# Evaluate metrics
+evaluate_metrics(y_test_true_rescaled, test_outputs_rescaled)
+
+# Evaluate metrics
+evaluate_metrics(y_test_true_rescaled, test_outputs_rescaled)
+
+# Example metrics (replace with actual metrics from evaluate_metrics)
+variables = target_cols
+mse = ((y_test_true_rescaled - test_outputs_rescaled) ** 2).mean(axis=0)
+mae = np.abs(y_test_true_rescaled - test_outputs_rescaled).mean(axis=0)
+from sklearn.metrics import r2_score
+r2 = r2_score(y_test_true_rescaled, test_outputs_rescaled, multioutput='raw_values')
+
+# Plot MSE, MAE, and R²
+fig, axes = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
+
+# MSE
+axes[0].bar(variables, mse, color='skyblue')
+axes[0].set_title("Mean Squared Error (MSE) per Variable")
+axes[0].set_ylabel("MSE")
+
+# MAE
+axes[1].bar(variables, mae, color='orange')
+axes[1].set_title("Mean Absolute Error (MAE) per Variable")
+axes[1].set_ylabel("MAE")
+
+# R²
+axes[2].bar(variables, r2, color='green')
+axes[2].set_title("R² Score per Variable")
+axes[2].set_ylabel("R²")
+axes[2].set_xlabel("Variables")
+
+plt.tight_layout()
+plt.show()
+
+# Plot true vs. predicted values for a single variable
+var_index = 0  # Index of the variable to plot
+var_name = variables[var_index]
+
+true_values = y_test_true_rescaled[:, var_index]
+predicted_values = test_outputs_rescaled[:, var_index]
+
+plt.figure(figsize=(12, 6))
+plt.plot(true_values[:200], label="True", color='blue')  # Limit to 200 points for clarity
+plt.plot(predicted_values[:200], label="Predicted", color='orange')
+plt.title(f"Actual vs. Predicted for {var_name}")
+plt.xlabel("Time Steps")
+plt.ylabel("Value")
+plt.legend()
+plt.show()
+

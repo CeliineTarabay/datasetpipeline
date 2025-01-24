@@ -59,7 +59,7 @@ def process_subject(data_dir, subject_id):
     # Read Timestamp from 'Recording start' in second row
     try:
         bio_timestamp = pd.read_csv(bio_file, nrows=2).iloc[1]['Recording start']
-        bio_timestamp = pd.to_datetime(bio_timestamp)
+        bio_timestamp = pd.to_datetime(bio_timestamp).floor('S')  # Round down to seconds
         print(f"[DEBUG] Extracted bio_timestamp for subject {subject_id}: {bio_timestamp}")
     except Exception as e:
         print(f"Error reading timestamp from bio file for subject {subject_id}: {e}")
@@ -84,7 +84,7 @@ def process_subject(data_dir, subject_id):
     
     # Convert 'Timestamp' from nanoseconds since epoch to datetime
     try:
-        env_df['Timestamp'] = pd.to_datetime(env_df['Timestamp'], unit='ns')
+        env_df['Timestamp'] = pd.to_datetime(env_df['Timestamp'], unit='ns').dt.floor('S')  # Truncate to seconds
     except Exception as e:
         print(f"Error converting timestamps in env file for subject {subject_id}: {e}")
         return None

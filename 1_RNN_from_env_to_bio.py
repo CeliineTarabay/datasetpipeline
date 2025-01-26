@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.utils as utils
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -95,6 +96,9 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
             outputs = model(x_batch_groups)
             loss = criterion(outputs, y_batch)
             loss.backward()
+
+            # === Gradient Clipping ===
+            utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Adjust `max_norm` as needed
             
             # === Gradient Monitoring ===
             total_norm = 0.0
@@ -266,7 +270,6 @@ feature_cols = [
     "SecondsOfDay",
     "DayOfWeek",
     "DaysFromJuly15",
-    # If there are any other relevant environmental variables in your dataset, you can add them here.
 ]
 
 target_cols = [
@@ -350,73 +353,36 @@ print("Val:", X_val_t.shape, Y_val_t.shape)
 print("Test:", X_test_t.shape, Y_test_t.shape)
 
 class LSTMAttnMultiHead(nn.Module):
-    def __init__(self, input_sizes, hidden_size, output_sizes, num_layers=7):
-        """
-        Args:
-            input_sizes (dict): Dictionary where keys are group names and values are the number of input features in each group.
-            hidden_size (int): Hidden size for LSTM layers and intermediate representations.
-            output_sizes (list): List of output sizes (one per output variable).
-            num_layers (int): Number of LSTM layers.
-        """
-        super(LSTMAttnMultiHead, self).__init__()
-        
-        # Define independent input processing layers for each group
+    def __init__(self, input_sizes, hidden_size, output_sizes, num_layers=3):
+        super().__init__()
         self.input_heads = nn.ModuleDict({
             group_name: nn.Sequential(
                 nn.Linear(input_size, hidden_size),
                 nn.ReLU(),
-                nn.Dropout(0.3)
-            )
-            for group_name, input_size in input_sizes.items()
+                nn.Dropout(0.2)  # Reduced dropout
+            ) for group_name, input_size in input_sizes.items()
         })
-
-        # Shared LSTM layers
-        self.lstm = nn.LSTM(hidden_size * len(input_sizes), hidden_size, num_layers, batch_first=True, dropout=0.2)
-        
-        # Attention mechanism
-        self.attn = nn.Linear(hidden_size, hidden_size)
-        self.v = nn.Linear(hidden_size, 1)
-        
-        # Separate output heads for each output variable
-        self.heads = nn.ModuleList([nn.Linear(hidden_size, output_size) for output_size in output_sizes])
+        self.lstm = nn.LSTM(
+            hidden_size * len(input_sizes), 
+            hidden_size, 
+            num_layers=num_layers, 
+            batch_first=True, 
+            dropout=0.2  # Reduced dropout
+        )
+        self.bn = nn.LayerNorm(hidden_size)  # Replace BatchNorm1d with LayerNorm
+        self.heads = nn.ModuleList([nn.Linear(hidden_size, sz) for sz in output_sizes])
 
     def forward(self, x_groups):
-        """
-        Forward pass for multi-head input and output processing.
-        
-        Args:
-            x_groups (dict): Dictionary of tensors where keys are group names and values are tensors of shape (batch_size, seq_length, input_size).
-        Returns:
-            Tensor: Concatenated outputs from all output heads.
-        """
-        
         processed_groups = []
-        
         for group_name, x_group in x_groups.items():
-            batch_size, seq_length, input_size = x_group.size()
-            
-            # Flatten input for Linear layer
-            x_group_flat = x_group.contiguous().view(-1, input_size)
-            
-            # Process with input head
-            processed_flat = self.input_heads[group_name](x_group_flat)
-            processed_group = processed_flat.view(batch_size, seq_length, -1)
-            processed_groups.append(processed_group)
-        
-        # Concatenate processed group outputs along the feature dimension
-        combined_inputs = torch.cat(processed_groups, dim=-1)  # Shape: (batch_size, seq_length, hidden_size * num_groups)
-
-        # Pass through LSTM layers
-        out, _ = self.lstm(combined_inputs)
-
-        # Attention mechanism
-        attn_scores = torch.tanh(self.attn(out))
-        attn_weights = torch.softmax(self.v(attn_scores), dim=1)
-        context = torch.sum(attn_weights * out, dim=1)
-
-        # Multi-head outputs
-        outputs = [head(context) for head in self.heads]
-        return torch.cat(outputs, dim=1)
+            x_flat = x_group.reshape(-1, x_group.size(-1))
+            processed = self.input_heads[group_name](x_flat)
+            processed = processed.reshape(x_group.size(0), x_group.size(1), -1)
+            processed_groups.append(processed)
+        combined = torch.cat(processed_groups, dim=-1)
+        out, (h_n, _) = self.lstm(combined)
+        context = self.bn(h_n[-1])  # BatchNorm applied
+        return torch.cat([head(context) for head in self.heads], dim=1)
 
 # Initialize the multi-head model
 # Map feature names to their indices in available_feature_cols

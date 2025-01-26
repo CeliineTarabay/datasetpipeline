@@ -6,11 +6,53 @@ import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 
 
 # Load and preprocess the dataset
 df = pd.read_csv("./dataset2.csv")
 df = df.sort_values(by=["SubjectID", "Time since start (s)"]).reset_index(drop=True)
+
+# Initialize writer
+writer = SummaryWriter("logs")
+
+input_groups = {
+    "environmental": [
+        "Temperature (°C)", "Relative Humidity (%)", "Absolute Humidity (g/m³)", 
+        "Barometric Pressure (mmHg)", "Dew Point (°C)", "Wind Chill (°C)", 
+        "Humidex (°C)", "UV Index", "Illuminance (lx)", 
+        "Solar Irradiance (W/m²)", "Solar PAR (μmol/m²/s)"
+    ],
+    "positional": [
+        "Latitude (°)", "Longitude (°)", "Altitude (m)", "Speed (m/s)", 
+        "Distance2Path", "distance_to_start", "distance_to_end", 
+        "azimuth", "altitude"
+    ],
+    "temporal": [
+        "Time (s) Run 1", "DayOfYear", "Year", "SecondsOfDay", 
+        "DayOfWeek", "DaysFromJuly15"
+    ],
+    "derived": [
+        "Temperature (°C)_Calibrata", "Relative Humidity (%)_Calibrata", 
+        "Wind Speed (km/hr) Run 1", "Wind Speed Run 1"
+    ]
+}
+
+def make_group_sequences(df, input_groups, target_cols, seq_length=10):
+    group_arrays = {group: [] for group in input_groups}
+    target_array = []
+    
+    for i in range(len(df) - seq_length):
+        for group, features in input_groups.items():
+            available_features = [f for f in features if f in df.columns]
+            group_arrays[group].append(df.iloc[i:i + seq_length][available_features].values)
+        target_array.append(df.iloc[i + seq_length][target_cols].values)
+    
+    group_tensors = {group: torch.tensor(np.array(group_arrays[group]), dtype=torch.float32)
+                     for group in group_arrays}
+    target_tensor = torch.tensor(np.array(target_array), dtype=torch.float32)
+    return group_tensors, target_tensor
+
 
 # Function to calculate and display evaluation metrics
 def evaluate_metrics(y_true, y_pred):
@@ -33,7 +75,10 @@ def evaluate_metrics(y_true, y_pred):
 def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t, X_val_t, Y_val_t, 
                               epochs=20, batch_size=32, check_interval=5, patience=5):
     best_val_loss = float('inf')
+    grace_threshold = 0.1
+    grace_patience = 0
     patience_counter = 0
+    patience = 10
     train_losses = []  # To store training loss
     val_losses = []    # To store validation loss
 
@@ -41,13 +86,61 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
         model.train()
         permutation = torch.randperm(X_train_t.size(0))
         batch_losses = []
-        
         for i in range(0, X_train_t.size(0), batch_size):
             indices = permutation[i:i + batch_size]
-            x_batch, y_batch = X_train_t[indices], Y_train_t[indices]
+            x_batch_groups = {group: x_train_groups[group][indices] for group in x_train_groups}
+            y_batch = Y_train_t[indices]
             
             optimizer.zero_grad()
-            outputs = model(x_batch)
+            outputs = model(x_batch_groups)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            
+            # === Gradient Monitoring ===
+            total_norm = 0.0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    param_norm = param.grad.data.norm(2).item()
+                    total_norm += param_norm ** 2
+                    writer.add_scalar(f"Gradients/{name}_norm", param_norm, epoch)
+            total_norm = total_norm ** 0.5
+            writer.add_scalar("Gradients/Total_Norm", total_norm, epoch)
+            # === End Monitoring ===
+            
+            optimizer.step()
+           
+        writer.close()
+        
+        # Initialize permutation inside the epoch loop
+        permutation = torch.randperm(X_train_t.size(0))
+        batch_losses = []
+        
+        # Determine which variables to include based on the epoch
+        if epoch == 10:  # Introduce medium variables
+            patience += 5  # Extend patience
+        if epoch == 20:  # Introduce hard variables
+            patience += 5  # Extend patience
+            
+        if epoch < 10:
+            active_variables = easy_variables
+        elif epoch < 20:
+            active_variables = easy_variables + medium_variables
+        else:
+            active_variables = easy_variables + medium_variables + hard_variables
+
+        active_indices = [variable_indices[var] for var in active_variables]
+        
+        for i in range(0, X_train_t.size(0), batch_size):
+            indices = permutation[i:i + batch_size]  # Create batch indices
+            
+            # Extract grouped inputs
+            x_batch_groups = {group: x_train_groups[group][indices] for group in x_train_groups}
+            y_batch = Y_train_t[indices]
+                        
+            optimizer.zero_grad()
+            outputs = model(x_batch_groups)
+            
+            # Compute loss
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
@@ -55,28 +148,37 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
             batch_losses.append(loss.item())
         
         train_loss = np.mean(batch_losses)
-        train_losses.append(train_loss)  # Save training loss
-
-        # Validation
+        train_losses.append(train_loss)
+        
+        # Validation step
         model.eval()
         with torch.no_grad():
-            val_outputs = model(X_val_t)
-            val_loss = criterion(val_outputs, Y_val_t).item()
-        val_losses.append(val_loss)  # Save validation loss
+            x_val_groups = {group: X_val_t[:, :, indices_list] 
+                            for group, indices_list in feature_indices.items()}
+            val_outputs = model(x_val_groups)[:, active_indices]
+            val_loss = sum(criterion(val_outputs[:, j:j+1], Y_val_t[:, active_indices][:, j:j+1]) 
+                           for j in range(len(active_indices))).item()
+        
+        val_losses.append(val_loss)
         
         print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        
-        # Early stopping
+             
+        # Patience and grace threshold logic
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            grace_patience = 0
             patience_counter = 0
             torch.save(model.state_dict(), "best_model.pth")
+        elif val_loss <= best_val_loss * (1 + grace_threshold):
+            grace_patience += 1
+            print(f"Validation loss increased slightly but is within the grace threshold: {val_loss:.4f}")
         else:
             patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered.")
-                break
-        
+
+        if patience_counter >= patience:
+            print("Early stopping triggered.")
+            break
+
         # User interaction
         if (epoch + 1) % check_interval == 0 and (epoch + 1) < epochs:
             response = input("Do you want to continue training? (yes/no): ").strip().lower()
@@ -84,7 +186,7 @@ def interactive_training_loop(model, optimizer, criterion, X_train_t, Y_train_t,
                 print("Training interrupted by user. Saving model and exiting.")
                 torch.save(model.state_dict(), f"model_epoch_{epoch + 1}.pth")
                 break
-    
+
     print("Training completed. Best validation loss: {:.4f}".format(best_val_loss))
     return train_losses, val_losses  # Return loss history
 
@@ -112,11 +214,29 @@ print("Train size:", len(train_df))
 print("Val size:", len(val_df))
 print("Test size:", len(test_df))
 
-from sklearn.preprocessing import StandardScaler
+# Initialize scalers for each group
+group_scalers = {group: StandardScaler() for group in input_groups}
 
-# Suppose you want to scale all columns except 'SubjectID' and 'Time since start (s)' 
-# and maybe the target columns if you want them in original scale.
-# Let's define which columns are your features (environmental + maybe some bio, if you wish).
+for group, features in input_groups.items():
+    available_features = [f for f in features if f in train_df.columns]
+    if available_features:
+        group_scalers[group].fit(train_df[available_features])
+
+# Fit scalers on training data
+for group, features in input_groups.items():
+    available_features = [f for f in features if f in train_df.columns]
+    if available_features:
+        group_scalers[group].fit(train_df[available_features])
+
+# Transform each group in the train, validation, and test datasets
+for df in [train_df, val_df, test_df]:
+    for group, features in input_groups.items():
+        available_features = [f for f in features if f in df.columns]
+        if available_features:
+            df[available_features] = group_scalers[group].transform(df[available_features])
+
+
+from sklearn.preprocessing import StandardScaler
 
 feature_cols = [
     "Temperature (°C)",
@@ -158,6 +278,15 @@ target_cols = [
     "Emotional Index (a.u.)",
     "Sympathovagal Balance (a.u.)",
 ]
+
+# Define variable difficulty (manual or based on metrics)
+easy_variables = ["Skin Conductance (microS)", "Tonic Skin Conductance (a.u.)"]
+medium_variables = ["Heart Rate (bpm)", "Phasic Skin Conductance (a.u.)"]
+hard_variables = ["Skin Conductance Phasic Driver (a.u.)", "Emotional Index (a.u.)", "Sympathovagal Balance (a.u.)"]
+
+# Map variable names to indices
+variable_indices = {var: i for i, var in enumerate(target_cols)}
+
 
 # Filter the feature columns to include only those present in the DataFrame
 available_feature_cols = [col for col in feature_cols if col in train_df.columns]
@@ -220,32 +349,105 @@ print("Train:", X_train_t.shape, Y_train_t.shape)
 print("Val:", X_val_t.shape, Y_val_t.shape)
 print("Test:", X_test_t.shape, Y_test_t.shape)
 
-# Define LSTM with Attention
-class LSTMAttn(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=10):
-        super(LSTMAttn, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.3)
+class LSTMAttnMultiHead(nn.Module):
+    def __init__(self, input_sizes, hidden_size, output_sizes, num_layers=7):
+        """
+        Args:
+            input_sizes (dict): Dictionary where keys are group names and values are the number of input features in each group.
+            hidden_size (int): Hidden size for LSTM layers and intermediate representations.
+            output_sizes (list): List of output sizes (one per output variable).
+            num_layers (int): Number of LSTM layers.
+        """
+        super(LSTMAttnMultiHead, self).__init__()
+        
+        # Define independent input processing layers for each group
+        self.input_heads = nn.ModuleDict({
+            group_name: nn.Sequential(
+                nn.Linear(input_size, hidden_size),
+                nn.ReLU(),
+                nn.Dropout(0.3)
+            )
+            for group_name, input_size in input_sizes.items()
+        })
+
+        # Shared LSTM layers
+        self.lstm = nn.LSTM(hidden_size * len(input_sizes), hidden_size, num_layers, batch_first=True, dropout=0.2)
+        
+        # Attention mechanism
         self.attn = nn.Linear(hidden_size, hidden_size)
         self.v = nn.Linear(hidden_size, 1)
-        self.fc = nn.Linear(hidden_size, output_size)
+        
+        # Separate output heads for each output variable
+        self.heads = nn.ModuleList([nn.Linear(hidden_size, output_size) for output_size in output_sizes])
 
-    def forward(self, x):
-        out, _ = self.lstm(x)
+    def forward(self, x_groups):
+        """
+        Forward pass for multi-head input and output processing.
+        
+        Args:
+            x_groups (dict): Dictionary of tensors where keys are group names and values are tensors of shape (batch_size, seq_length, input_size).
+        Returns:
+            Tensor: Concatenated outputs from all output heads.
+        """
+        
+        processed_groups = []
+        
+        for group_name, x_group in x_groups.items():
+            batch_size, seq_length, input_size = x_group.size()
+            
+            # Flatten input for Linear layer
+            x_group_flat = x_group.contiguous().view(-1, input_size)
+            
+            # Process with input head
+            processed_flat = self.input_heads[group_name](x_group_flat)
+            processed_group = processed_flat.view(batch_size, seq_length, -1)
+            processed_groups.append(processed_group)
+        
+        # Concatenate processed group outputs along the feature dimension
+        combined_inputs = torch.cat(processed_groups, dim=-1)  # Shape: (batch_size, seq_length, hidden_size * num_groups)
+
+        # Pass through LSTM layers
+        out, _ = self.lstm(combined_inputs)
+
+        # Attention mechanism
         attn_scores = torch.tanh(self.attn(out))
         attn_weights = torch.softmax(self.v(attn_scores), dim=1)
         context = torch.sum(attn_weights * out, dim=1)
-        return self.fc(context)
 
-# Initialize the model, loss function, and optimizer
-input_size = len(available_feature_cols)  # Use the filtered feature columns
-output_size = len(available_target_cols)  # Use the filtered target columns
+        # Multi-head outputs
+        outputs = [head(context) for head in self.heads]
+        return torch.cat(outputs, dim=1)
+
+# Initialize the multi-head model
+# Map feature names to their indices in available_feature_cols
+feature_indices = {
+    group: [available_feature_cols.index(f) for f in features if f in available_feature_cols]
+    for group, features in input_groups.items()
+}
+
+# Update input sizes based on available features
+input_sizes = {group: len(indices) for group, indices in feature_indices.items()}
 hidden_size = 128
+output_sizes = [1] * len(available_target_cols)
 epochs = 40  # Total number of epochs you intend to train for
-batch_size = 128
+batch_size = 64
 
-model = LSTMAttn(input_size, hidden_size, output_size)
+# Initialize the model with updated input sizes
+model = LSTMAttnMultiHead(input_sizes=input_sizes, hidden_size=128, output_sizes=output_sizes)
+
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=1e-2, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2)
+
+
+# Create grouped inputs
+x_train_groups = {group: torch.tensor(X_train[:, :, indices], dtype=torch.float32)
+                  for group, indices in feature_indices.items()}
+x_val_groups = {group: torch.tensor(X_val[:, :, indices], dtype=torch.float32)
+                for group, indices in feature_indices.items()}
+x_test_groups = {group: torch.tensor(X_test[:, :, indices], dtype=torch.float32)
+                 for group, indices in feature_indices.items()}
+
 
 # Call the interactive training loop
 train_losses, val_losses = interactive_training_loop(
@@ -258,38 +460,45 @@ train_losses, val_losses = interactive_training_loop(
     Y_val_t=Y_val_t,
     epochs=epochs,
     batch_size=batch_size,
-    check_interval=5,  # Ask every 5 epochs
+    check_interval=20,  # Ask every 5 epochs
     patience=8         # Early stopping patience
 )
 
 # Plot training and validation loss
 plt.figure(figsize=(10, 5))
-plt.plot(train_losses, label="Training Loss", color='blue')
-plt.plot(val_losses, label="Validation Loss", color='orange')
+plt.plot(train_losses, label="Training Loss", color='blue', linewidth=2)
+plt.plot(val_losses, label="Validation Loss", color='orange', linewidth=2)
 plt.title("Training and Validation Loss over Epochs")
 plt.xlabel("Epochs")
 plt.ylabel("Loss")
 plt.legend()
+plt.grid(True)
 plt.show()
 
 # Evaluate on test data
 model.eval()
 with torch.no_grad():
-    test_outputs = model(X_test_t).cpu().numpy()  # Predicted values
+    # Group the test data
+    x_test_groups = {group: X_test_t[:, :, indices_list] 
+                     for group, indices_list in feature_indices.items()}
+    
+    # Pass grouped test data to the model
+    test_outputs = model(x_test_groups).cpu().numpy()  # Predicted values
     y_test_true = Y_test_t.cpu().numpy()  # True values
 
-# Scale back biological variables to original scale
+# Scale back biological variables to the original scale
 test_outputs_rescaled = bio_scaler.inverse_transform(test_outputs)
 y_test_true_rescaled = bio_scaler.inverse_transform(y_test_true)
 
 # Evaluate metrics
 evaluate_metrics(y_test_true_rescaled, test_outputs_rescaled)
 
-# Evaluate on test data
+# Validation or testing
 model.eval()
 with torch.no_grad():
-    test_outputs = model(X_test_t).cpu().numpy()  # Predicted values
-    y_test_true = Y_test_t.cpu().numpy()  # True values
+    x_val_groups = {group: x_val_groups[group] for group in x_val_groups}
+    val_outputs = model(x_val_groups)
+    val_loss = criterion(val_outputs, Y_val_t)
 
 # Scale back biological variables to original scale
 test_outputs_rescaled = bio_scaler.inverse_transform(test_outputs)
@@ -307,6 +516,10 @@ mse = ((y_test_true_rescaled - test_outputs_rescaled) ** 2).mean(axis=0)
 mae = np.abs(y_test_true_rescaled - test_outputs_rescaled).mean(axis=0)
 from sklearn.metrics import r2_score
 r2 = r2_score(y_test_true_rescaled, test_outputs_rescaled, multioutput='raw_values')
+
+# Print metrics for debugging (optional)
+for i, var in enumerate(variables):
+    print(f"{var}: MSE={mse[i]:.4f}, MAE={mae[i]:.4f}, R²={r2[i]:.4f}")
 
 # Plot MSE, MAE, and R²
 fig, axes = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
@@ -345,4 +558,19 @@ plt.xlabel("Time Steps")
 plt.ylabel("Value")
 plt.legend()
 plt.show()
+
+
+# Plot time-series for multiple variables
+for var_index, var_name in enumerate(variables):
+    true_values = y_test_true_rescaled[:, var_index]
+    predicted_values = test_outputs_rescaled[:, var_index]
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(true_values[:200], label="True", color='blue')  # Limit to 200 points for clarity
+    plt.plot(predicted_values[:200], label="Predicted", color='orange')
+    plt.title(f"Actual vs. Predicted for {var_name}")
+    plt.xlabel("Time Steps")
+    plt.ylabel("Value")
+    plt.legend()
+    plt.show()
 

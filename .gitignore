@@ -3,3 +3,17 @@
 /biosource
 dataset1.csv
 dataset2.csv
+TIMESTAMPS.xlsx
+psychological_scores.csv
+/3_psy_ramdom_forest/combined_dataset.csv
+/3_psy_ramdom_forest/aggregated_biological_data.csv
+/3_psy_ramdom_forest/psych_model.pkl
+/3_psy_ramdom_forest/train_test_split.npz
+/4_psy_RNN/lstm_psych_model.h5
+/4_psy_RNN/lstm_train_test_split.npz
+/5_psy_RNN_full_sequence/holdout_metadata.csv
+/5_psy_RNN_full_sequence/holdout_predictions.npy
+/5_psy_RNN_full_sequence/holdout_results.csv
+/5_psy_RNN_full_sequence/lstm_holdout.npz
+/5_psy_RNN_full_sequence/lstm_psych_full_phase.h5
+/5_psy_RNN_full_sequence/lstm_train_test_full_phase.npz

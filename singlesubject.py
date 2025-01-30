@@ -51,7 +51,7 @@ def process_files(source_path, suffix):
                             data[new_col_name] = data[col] * CONVERSION_FACTOR
                         else:
                             # Rename column without conversion
-                            new_col_name = f"Wind Speed Run {i}"
+                            new_col_name = f"Wind Speed (km/hr) Run {i}"
                             data[new_col_name] = data[col]
 
                         # Drop the original column

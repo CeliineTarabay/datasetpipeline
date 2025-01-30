@@ -59,7 +59,7 @@ def process_subject(data_dir, subject_id):
     # Read Timestamp from 'Recording start' in second row
     try:
         bio_timestamp = pd.read_csv(bio_file, nrows=2).iloc[1]['Recording start']
-        bio_timestamp = pd.to_datetime(bio_timestamp).floor('S')  # Round down to seconds
+        bio_timestamp = pd.to_datetime(bio_timestamp).floor('s')  # Round down to seconds
         print(f"[DEBUG] Extracted bio_timestamp for subject {subject_id}: {bio_timestamp}")
     except Exception as e:
         print(f"Error reading timestamp from bio file for subject {subject_id}: {e}")
@@ -84,7 +84,7 @@ def process_subject(data_dir, subject_id):
     
     # Convert 'Timestamp' from nanoseconds since epoch to datetime
     try:
-        env_df['Timestamp'] = pd.to_datetime(env_df['Timestamp'], unit='ns').dt.floor('S')  # Truncate to seconds
+        env_df['Timestamp'] = pd.to_datetime(env_df['Timestamp'], unit='ns').dt.floor('s')  # Truncate to seconds
     except Exception as e:
         print(f"Error converting timestamps in env file for subject {subject_id}: {e}")
         return None
@@ -107,17 +107,33 @@ def process_subject(data_dir, subject_id):
     # Trim env_df to expected_env_rows
     env_df = env_df.head(expected_env_rows)
 
-    # Assign env data to every 8th bio row
-    bio_df['Timestamp'] = pd.NaT  # Initialize 'Timestamp' column with NaT
+    # Validate the length of env_df and bio_df before proceeding
+    if len(env_df) < num_bio_rows // frequency_ratio:
+        print(f"[WARNING] Insufficient data in env file for subject {subject_id}. Skipping this subject.")
+        return None
 
     # Add all relevant env columns to bio_df
-    for column in env_df.columns:
-        if column != 'Timestamp':  # Skip Timestamp since it's already handled
-            bio_df[column] = pd.NA  # Initialize with NaN
-            bio_df.loc[::frequency_ratio, column] = env_df[column].values
+    try:
+        for column in env_df.columns:
+            if column != 'Timestamp':  # Skip Timestamp since it's already handled
+                bio_df[column] = pd.NA  # Initialize with NaN
+                bio_df.loc[::frequency_ratio, column] = env_df[column].values
+
+        # Assign Timestamp separately
+        bio_df.loc[::frequency_ratio, 'Timestamp'] = env_df['Timestamp'].values
+    except ValueError as e:
+        print(f"[ERROR] Length mismatch between bio and env data for subject {subject_id}: {e}")
+        print(f"[INFO] Skipping subject {subject_id} due to processing error.")
+        return None
 
     # Assign Timestamp separately
-    bio_df.loc[::frequency_ratio, 'Timestamp'] = env_df['Timestamp'].values
+    try:
+        if len(env_df['Timestamp'].values) == len(bio_df.loc[::frequency_ratio, 'Timestamp']):
+            bio_df.loc[::frequency_ratio, 'Timestamp'] = env_df['Timestamp'].values
+        else:
+            print(f"[WARNING] Length mismatch for 'Timestamp' in subject {subject_id}. Skipping 'Timestamp'.")
+    except Exception as e:
+        print(f"[ERROR] Failed to assign 'Timestamp' values for subject {subject_id}: {e}")
 
     # Add Subject ID column
     bio_df.insert(0, 'SubjectID', subject_id)

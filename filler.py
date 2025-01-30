@@ -15,6 +15,35 @@ method = args.method
 
 data = pd.read_csv(input_file)
 
+# Handle other missing values in the dataset if needed
+def fill_remaining_values(df, method):
+    for column in df.columns:
+        if column not in one_hot_columns and df[column].isnull().any():
+            if df[column].dtype in ['float64', 'int64']:
+                # Interpolate or use the specified method for numeric columns
+                if method in ['linear', 'quadratic', 'cubic', 'nearest']:
+                    df[column] = df[column].interpolate(method=method, limit_direction='both')
+                df[column] = df[column].ffill().bfill()
+            else:
+                # Forward and backward fill for non-numeric columns
+                df[column] = df[column].ffill().bfill()
+    return df
+
+# Fill the gaps in one-hot encoded columns using forward-fill logic
+def fill_one_hot_columns(df):
+    for column in one_hot_columns:
+        if column in df.columns:
+            df[column] = df[column].fillna(method='ffill')
+    return df
+
+def split_geometry_column(df):
+    if 'geometry' in df.columns:
+        # Extract Latitude and Longitude from the 'geometry' column
+        df[['Longitude', 'Latitude']] = df['geometry'].str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)').astype(float)
+        # Drop the original 'geometry' column if no longer needed
+        df = df.drop(columns=['geometry'])
+    return df
+
 # Standardize the Timestamp column
 def preprocess_timestamp_column(df):
     # Fill missing or empty timestamps with NaT
@@ -44,11 +73,22 @@ def preprocess_timestamp_column(df):
     df['DaysFromJuly15'] = (df['Timestamp'] - jul_15).dt.days.abs()
     return df
 
+# Define the columns for one-hot encoding
+one_hot_columns = [
+    'PRE', 'Baseline', 'Baseline -> Cafe', 'Cafe', 'Cafe -> Square', 'Square',
+    'Square -> Crosswalk', 'Crosswalk', 'Crosswalk -> U3', 'U3', 
+    'U3 -> Trivulziana', 'Trivulziana', 'Trivulziana -> U4', 'U4', 
+    'U4 -> Tram', 'Tram', 'POST', 'static'
+]
+
 
 
 # Main logic
 # Preprocess the Timestamp column to standardize format
 data = preprocess_timestamp_column(data)
+
+# Handle missing numerical values before dropping Timestamp
+data = fill_remaining_values(data, method)
 
 # Count unique SubjectIDs with invalid (non-empty, but unparseable) timestamps
 invalid_timestamps = data[data['Timestamp'].isna()]
@@ -62,13 +102,6 @@ if subjects_with_nat > 0:
 else:
     print("No subjects have unparseable timestamps.")
 
-def split_geometry_column(df):
-    if 'geometry' in df.columns:
-        # Extract Latitude and Longitude from the 'geometry' column
-        df[['Longitude', 'Latitude']] = df['geometry'].str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)').astype(float)
-        # Drop the original 'geometry' column if no longer needed
-        df = df.drop(columns=['geometry'])
-    return df
 
 # Split 'geometry' column into 'Longitude' and 'Latitude'
 data = split_geometry_column(data)
@@ -78,32 +111,21 @@ if 'geometry' in data.columns:
     data = data.drop(columns=['geometry'])
 
 
-def fill_missing_values(df, method):
-    for column in df.columns:
-        if df[column].isnull().any():
-            if df[column].dtype in ['float64', 'int64']:
-                if method in ['linear', 'quadratic', 'cubic', 'nearest']:
-                    # Interpolate where possible
-                    df[column] = df[column].interpolate(method=method, limit_direction='both')
-                
-                # Fill remaining missing values at edges
-                if df[column].isnull().any():
-                    df[column] = df[column].fillna(method='ffill').fillna(method='bfill')
-                
-                # Optionally, fill any persistent NaNs with zeros (or another value)
-                if df[column].isnull().any():
-                    df[column] = df[column].fillna(0)
-            else:
-                # Use forward fill and backward fill for non-numeric columns
-                df[column] = df[column].fillna(method='ffill').fillna(method='bfill')
-    return df
 
-# Drop the 'Timestamp' column if it exists
+# Drop 'Timestamp' column
 if 'Timestamp' in data.columns:
-    data = data.drop(columns=['Timestamp'])
+    data = data.drop(columns=['Timestamp'], errors='raise')
 
-# Save the filled dataset to a new file
-filled_data = data.groupby('SubjectID', group_keys=False).apply(lambda group: fill_missing_values(group, method))
+# Process one-hot encoded columns, preserving SubjectID
+filled_data = data.groupby('SubjectID', group_keys=False).apply(
+    lambda group: fill_one_hot_columns(group)
+)
+
+# Ensure remaining missing values are handled
+filled_data = filled_data.groupby('SubjectID', group_keys=False).apply(
+    lambda group: fill_remaining_values(group, method)
+).reset_index(drop=True)
+
+# Save the result
 filled_data.to_csv(output_file, index=False)
-
 print(f"Missing values filled using {method} method and saved to {output_file}.")
